@@ -13,6 +13,7 @@
 #include "DataSettings.h"
 
 #include <dirent.h>
+#include <sstream>
 
 #include <glib/gi18n.h>
 
@@ -21,7 +22,6 @@
 #include "iptux-utils/utils.h"
 #include "iptux/UiCoreThread.h"
 #include "iptux/UiHelper.h"
-#include "iptux/UiProgramData.h"
 #include "iptux/callback.h"
 
 using namespace std;
@@ -31,15 +31,35 @@ namespace iptux {
 /**
  * 类构造函数.
  */
-DataSettings::DataSettings(Application* app)
+DataSettings::DataSettings(Application* app, GtkWidget* parent)
     : app(app), widset(NULL), mdlset(NULL) {
   InitSublayer();
+  dialog_ = GTK_DIALOG(CreateMainDialog(parent));
+  g_object_ref_sink(G_OBJECT(dialog_));
+
+  /* 创建相关数据设置标签 */
+  GtkWidget* note = gtk_notebook_new();
+  gtk_notebook_set_tab_pos(GTK_NOTEBOOK(note), GTK_POS_TOP);
+  gtk_notebook_set_scrollable(GTK_NOTEBOOK(note), TRUE);
+  gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(dialog_)), note, TRUE,
+                     TRUE, 0);
+  GtkWidget* label = gtk_label_new(_("Personal"));
+  gtk_notebook_append_page(GTK_NOTEBOOK(note), CreatePersonal(), label);
+  label = gtk_label_new(_("System"));
+  gtk_notebook_append_page(GTK_NOTEBOOK(note), CreateSystem(), label);
+  label = gtk_label_new(_("Network"));
+  gtk_notebook_append_page(GTK_NOTEBOOK(note), CreateNetwork(), label);
+
+  /* 设置相关数据默认值 */
+  SetPersonalValue();
+  SetSystemValue();
 }
 
 /**
  * 类析构函数.
  */
 DataSettings::~DataSettings() {
+  gtk_widget_destroy(GTK_WIDGET(dialog_));
   ClearSublayer();
 }
 
@@ -47,61 +67,44 @@ DataSettings::~DataSettings() {
  * 程序数据设置入口.
  * @param parent 父窗口指针
  */
-void DataSettings::ResetDataEntry(Application* app,
-                                  GtkWidget* parent,
-                                  bool run) {
-  DataSettings dset(app);
-  GtkWidget* dialog;
-  GtkWidget *note, *label;
+void DataSettings::ResetDataEntry(Application* app, GtkWidget* parent) {
+  if (app->getPreferenceDialog()) {
+    gtk_window_present(GTK_WINDOW(app->getPreferenceDialog()));
+    return;
+  }
 
-  auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
-
-  dialog = dset.CreateMainDialog(parent);
-
-  /* 创建相关数据设置标签 */
-  note = gtk_notebook_new();
-  gtk_notebook_set_tab_pos(GTK_NOTEBOOK(note), GTK_POS_LEFT);
-  gtk_notebook_set_scrollable(GTK_NOTEBOOK(note), TRUE);
-  gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dialog))),
-                     note, TRUE, TRUE, 0);
-  label = gtk_label_new(_("Personal"));
-  gtk_notebook_append_page(GTK_NOTEBOOK(note), dset.CreatePersonal(), label);
-  label = gtk_label_new(_("System"));
-  gtk_notebook_append_page(GTK_NOTEBOOK(note), dset.CreateSystem(), label);
-  label = gtk_label_new(_("Network"));
-  gtk_notebook_append_page(GTK_NOTEBOOK(note), dset.CreateNetwork(), label);
-
-  /* 设置相关数据默认值 */
-  dset.SetPersonalValue();
-  dset.SetSystemValue();
+  DataSettings dset(app, parent);
+  GtkWidget* dialog = GTK_WIDGET(dset.dialog());
+  app->setPreferenceDialog(dialog);
 
   /* 运行对话框 */
   gtk_widget_show_all(dialog);
-  if (!run) {
-    gtk_widget_destroy(dialog);
-    return;
+  bool done = false;
+  while (!done) {
+    switch (gtk_dialog_run(GTK_DIALOG(dialog))) {
+      case GTK_RESPONSE_OK:
+        if (dset.Save()) {
+          if (app->getProgramData()->need_restart()) {
+            pop_warning(dialog,
+                        _("The program needs to be restarted to take effect!"));
+          }
+          done = true;
+        }
+        break;
+      case GTK_RESPONSE_APPLY:
+        if (dset.Save()) {
+          if (app->getProgramData()->need_restart()) {
+            pop_warning(dialog,
+                        _("The program needs to be restarted to take effect!"));
+          }
+        }
+        break;
+      default:
+        done = true;
+        break;
+    }
   }
-mark:
-  switch (gtk_dialog_run(GTK_DIALOG(dialog))) {
-    case GTK_RESPONSE_OK:
-      dset.ObtainPersonalValue();
-      dset.ObtainSystemValue();
-      dset.ObtainNetworkValue();
-      g_progdt->WriteProgData();
-      g_cthrd->UpdateMyInfo();
-      break;
-    case GTK_RESPONSE_APPLY:
-      dset.ObtainPersonalValue();
-      dset.ObtainSystemValue();
-      dset.ObtainNetworkValue();
-      g_progdt->WriteProgData();
-      g_cthrd->UpdateMyInfo();
-      goto mark;
-    default:
-      break;
-  }
-  gtk_widget_destroy(dialog);
+  app->setPreferenceDialog(NULL);
 }
 
 /**
@@ -159,53 +162,65 @@ GtkWidget* DataSettings::CreatePersonal() {
   GtkWidget *label, *button, *widget;
   GtkTreeModel* model;
 
-  box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  box = gtk_grid_new();
+  g_object_set(box, "margin", 10, "column-spacing", 10, "row-spacing", 10,
+               NULL);
   /* 昵称 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Your nickname:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new_with_mnemonic(_("Your _nickname:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, 0, 1, 1);
+
   widget = gtk_entry_new();
-  g_object_set(widget, "has-tooltip", TRUE, NULL);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
+  g_object_set(widget, "has-tooltip", TRUE, "hexpand", TRUE, NULL);
   g_signal_connect(widget, "query-tooltip", G_CALLBACK(entry_query_tooltip),
                    _("Please input your nickname!"));
   g_datalist_set_data(&widset, "nickname-entry-widget", widget);
+  gtk_label_set_mnemonic_widget(GTK_LABEL(label), widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, 0, 1, 1);
+
   /* 群组 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Your group name:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new_with_mnemonic(_("Your _group name:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, 1, 1, 1);
+
   widget = gtk_entry_new();
   g_object_set(widget, "has-tooltip", TRUE, NULL);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
   g_signal_connect(widget, "query-tooltip", G_CALLBACK(entry_query_tooltip),
                    _("Please input your group name!"));
   g_datalist_set_data(&widset, "mygroup-entry-widget", widget);
+  gtk_label_set_mnemonic_widget(GTK_LABEL(label), widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, 1, 1, 1);
+
   /* 头像 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Your face picture:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new_with_mnemonic(_("Your _face picture:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, 2, 1, 1);
+
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
   model = GTK_TREE_MODEL(iconModel);
   widget = CreateIconTree(model);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
   g_datalist_set_data(&widset, "myicon-combo-widget", widget);
+  gtk_label_set_mnemonic_widget(GTK_LABEL(label), widget);
+  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
+
   button = gtk_button_new_with_label("...");
   g_object_set_data(G_OBJECT(button), "icon-combo-widget", widget);
-  gtk_box_pack_start(GTK_BOX(hbox), button, FALSE, FALSE, 0);
   g_signal_connect(button, "clicked", G_CALLBACK(AddNewIcon), &widset);
+  gtk_box_pack_end(GTK_BOX(hbox), button, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), hbox, 1, 2, 1, 1);
+
   /* 文件存档 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Save files to: "));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new_with_mnemonic(_("_Save files to: "));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, 3, 1, 1);
+
   widget = CreateArchiveChooser();
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
+  gtk_label_set_mnemonic_widget(GTK_LABEL(label), widget);
   g_datalist_set_data(&widset, "archive-chooser-widget", widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, 3, 1, 1);
 
   hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 5);
+  gtk_grid_attach(GTK_GRID(box), hbox, 0, 4, 2, 1);
   /* 个人形象照片 */
   NO_OPERATION_C
   frame = gtk_frame_new(_("Photo"));
@@ -242,39 +257,67 @@ GtkWidget* DataSettings::CreatePersonal() {
  * @return 主窗体
  */
 GtkWidget* DataSettings::CreateSystem() {
-  GtkWidget *box, *hbox;
+  GtkGrid* box;
+  GtkWidget* hbox;
   GtkWidget *label, *button, *widget;
   GtkTreeModel* model;
 
-  box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  box = GTK_GRID(gtk_grid_new());
+  g_object_set(box, "margin", 10, "column-spacing", 10, "row-spacing", 5, NULL);
+
+  int row = 0;
+
+  /* port */
+  label = gtk_label_new(_("Port:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(box, label, 0, row, 1, 1);
+
+  widget = gtk_entry_new();
+  g_object_set(widget, "has-tooltip", TRUE, "hexpand", TRUE, "input-purpose",
+               GTK_INPUT_PURPOSE_DIGITS, "max-length", 5, "tooltip-text",
+               _("Any port number between 1024 and 65535, default is 2425"),
+               NULL);
+  g_datalist_set_data(&widset, "port-entry-widget", widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, row, 1, 1);
+  gtk_label_set_mnemonic_widget(GTK_LABEL(label), widget);
+
+  row++;
+
   /* 候选编码 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Candidate network coding:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new(_("Candidate network encodings:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, row, 1, 1);
+
   widget = gtk_entry_new();
-  g_object_set(widget, "has-tooltip", TRUE, NULL);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
+  g_object_set(widget, "has-tooltip", TRUE, "hexpand", TRUE, NULL);
   g_signal_connect(widget, "query-tooltip", G_CALLBACK(entry_query_tooltip),
-                   _("Candidate network coding"));
+                   _("Candidate network encodings, separated by \",\""));
   g_datalist_set_data(&widset, "codeset-entry-widget", widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, row, 1, 1);
+
+  row++;
+
   /* 首选编码 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
-  label = gtk_label_new(_("Preference network coding:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  label = gtk_label_new(_("Preferred network encoding:"));
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, row, 1, 1);
+
   widget = gtk_entry_new();
   g_object_set(widget, "has-tooltip", TRUE, NULL);
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
   g_signal_connect(widget, "query-tooltip", G_CALLBACK(entry_query_tooltip),
                    _("Preference network coding (You should be aware of "
                      "what you are doing if you want to modify it.)"));
   g_datalist_set_data(&widset, "encode-entry-widget", widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, row, 1, 1);
+
+  row++;
+
   /* 好友头像 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Pal's default face picture:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, row, 1, 1);
+
+  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   model = GTK_TREE_MODEL(this->iconModel);
   widget = CreateIconTree(model);
   gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
@@ -283,56 +326,91 @@ GtkWidget* DataSettings::CreateSystem() {
   g_object_set_data(G_OBJECT(button), "icon-combo-widget", widget);
   gtk_box_pack_start(GTK_BOX(hbox), button, FALSE, FALSE, 0);
   g_signal_connect(button, "clicked", G_CALLBACK(AddNewIcon), &widset);
+  gtk_grid_attach(GTK_GRID(box), hbox, 1, row, 1, 1);
+
+  row++;
+
   /* 面板字体 */
-  hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
   label = gtk_label_new(_("Panel font:"));
-  gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+  gtk_widget_set_halign(label, GTK_ALIGN_END);
+  gtk_grid_attach(GTK_GRID(box), label, 0, row, 1, 1);
+
   widget = CreateFontChooser();
-  gtk_box_pack_start(GTK_BOX(hbox), widget, TRUE, TRUE, 0);
   g_datalist_set_data(&widset, "font-chooser-widget", widget);
+  gtk_grid_attach(GTK_GRID(box), widget, 1, row, 1, 1);
+
+  row++;
 
   /* 有消息时直接弹出聊天窗口 */
   widget =
       gtk_check_button_new_with_label(_("Automatically open the chat dialog"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "chat-check-widget", widget);
+
+  row++;
+
   /* 隐藏面板，只显示状态图标 */
   widget = gtk_check_button_new_with_label(
       _("Automatically hide the panel after login"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "statusicon-check-widget", widget);
+
+  row++;
+
   /* 打开文件传输管理器 */
   widget = gtk_check_button_new_with_label(
       _("Automatically open the File Transmission Management"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "transmission-check-widget", widget);
+
+  row++;
+
   /* enter键发送消息 */
   widget =
       gtk_check_button_new_with_label(_("Use the 'Enter' key to send message"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "enterkey-check-widget", widget);
+
+  row++;
+
   /* 清空聊天历史记录 */
   widget = gtk_check_button_new_with_label(
       _("Automatically clean up the chat history"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "history-check-widget", widget);
+
+  row++;
+
   /* 记录日志 */
   widget = gtk_check_button_new_with_label(_("Save the chat history"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "log-check-widget", widget);
+
+  row++;
+
   /* 黑名单 */
   widget =
       gtk_check_button_new_with_label(_("Use the Blacklist (NOT recommended)"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "blacklist-check-widget", widget);
+
+  row++;
+
   /* 过滤共享文件请求 */
   widget =
       gtk_check_button_new_with_label(_("Filter the request of sharing files"));
-  gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
   g_datalist_set_data(&widset, "shared-check-widget", widget);
 
-  return box;
+#if HAVE_APPINDICATOR
+  row++;
+  widget = gtk_check_button_new_with_label(
+      _("Hide the taskbar when the main window is minimized"));
+  gtk_grid_attach(GTK_GRID(box), widget, 0, row, 2, 1);
+  g_datalist_set_data(&widset, "taskbar-check-widget", widget);
+#endif
+
+  return GTK_WIDGET(box);
 }
 
 /**
@@ -347,6 +425,7 @@ GtkWidget* DataSettings::CreateNetwork() {
   GtkTreeModel* model;
 
   box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  g_object_set(box, "margin", 10, NULL);
   /* 接受输入 */
   hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_pack_start(GTK_BOX(box), hbox, FALSE, FALSE, 0);
@@ -421,6 +500,10 @@ GtkWidget* DataSettings::CreateNetwork() {
   return box;
 }
 
+GtkWidget* DataSettings::GetWidget(const char* name) {
+  return GTK_WIDGET(g_datalist_get_data(&widset, name));
+}
+
 /**
  * 为界面设置与个人相关的数据
  */
@@ -433,7 +516,7 @@ void DataSettings::SetPersonalValue() {
   gint active;
 
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto g_progdt = g_cthrd->getProgramData();
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "nickname-entry-widget"));
   gtk_entry_set_text(GTK_ENTRY(widget), g_progdt->nickname.c_str());
@@ -468,8 +551,11 @@ void DataSettings::SetSystemValue() {
   gint active;
 
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto g_progdt = g_cthrd->getProgramData();
 
+  widget = GTK_WIDGET(g_datalist_get_data(&widset, "port-entry-widget"));
+  gtk_entry_set_text(GTK_ENTRY(widget),
+                     stringFormat("%d", g_progdt->port()).c_str());
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "codeset-entry-widget"));
   gtk_entry_set_text(GTK_ENTRY(widget), g_progdt->codeset.c_str());
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "encode-entry-widget"));
@@ -482,7 +568,7 @@ void DataSettings::SetSystemValue() {
   gtk_font_chooser_set_font(GTK_FONT_CHOOSER(widget), g_progdt->font);
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "chat-check-widget"));
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget),
-                               g_progdt->IsAutoOpenCharDialog());
+                               g_progdt->IsAutoOpenChatDialog());
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "statusicon-check-widget"));
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget),
                                g_progdt->IsAutoHidePanelAfterLogin());
@@ -505,6 +591,12 @@ void DataSettings::SetSystemValue() {
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "shared-check-widget"));
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget),
                                g_progdt->IsFilterFileShareRequest());
+#if HAVE_APPINDICATOR
+  widget = GTK_WIDGET(g_datalist_get_data(&widset, "taskbar-check-widget"));
+  gtk_toggle_button_set_active(
+      GTK_TOGGLE_BUTTON(widget),
+      g_progdt->isHideTaskbarWhenMainWindowIconified());
+#endif
 }
 
 /**
@@ -565,7 +657,7 @@ void DataSettings::FillIconModel(GtkTreeModel* model) {
  */
 void DataSettings::FillNetworkModel(GtkTreeModel* model) {
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto g_progdt = g_cthrd->getProgramData();
   for (const NetSegment& pns : g_progdt->getNetSegments()) {
     GtkTreeIter iter;
     gtk_list_store_append(GTK_LIST_STORE(model), &iter);
@@ -668,6 +760,25 @@ GtkWidget* DataSettings::CreateFontChooser() {
   return chooser;
 }
 
+string DataSettings::Check() {
+  return ObtainSystemValue(true);
+}
+
+bool DataSettings::Save() {
+  string err_info = Check();
+  if (!err_info.empty()) {
+    pop_warning(GTK_WIDGET(dialog_), "%s", err_info.c_str());
+    return false;
+  }
+
+  ObtainPersonalValue();
+  ObtainSystemValue();
+  ObtainNetworkValue();
+  app->getProgramData()->WriteProgData();
+  app->getCoreThread()->UpdateMyInfo();
+  return true;
+}
+
 /**
  * 获取与个人相关的数据.
  */
@@ -683,7 +794,7 @@ void DataSettings::ObtainPersonalValue() {
   gint active;
 
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto g_progdt = g_cthrd->getProgramData();
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "nickname-entry-widget"));
   if (*(text = gtk_entry_get_text(GTK_ENTRY(widget))) != '\0') {
@@ -704,23 +815,24 @@ void DataSettings::ObtainPersonalValue() {
     snprintf(path, MAX_PATHLEN, "%d", active);
     gtk_tree_model_get_iter_from_string(model, &iter, path);
     gtk_tree_model_get(model, &iter, 1, &file, -1);
-    if (strcmp(g_progdt->myicon.c_str(), file) != 0) {
-      snprintf(path, MAX_PATHLEN, __PIXMAPS_PATH "/icon/%s", file);
-      if (access(path, F_OK) != 0) {
-        g_free(file);
-        g_progdt->myicon = "my-icon";
-        snprintf(path, MAX_PATHLEN, "%s" ICON_PATH "/my-icon",
-                 g_get_user_config_dir());
-        gtk_tree_model_get(model, &iter, 0, &pixbuf, -1);
-        gdk_pixbuf_save(pixbuf, path, "png", NULL, NULL);
-        gtk_icon_theme_add_builtin_icon(g_progdt->myicon.c_str(), MAX_ICONSIZE,
-                                        pixbuf);
-        g_object_unref(pixbuf);
-      } else {
-        g_progdt->myicon = file;
+    if (file) {
+      if (strcmp(g_progdt->myicon.c_str(), file) != 0) {
+        snprintf(path, MAX_PATHLEN, __PIXMAPS_PATH "/icon/%s", file);
+        if (access(path, F_OK) != 0) {
+          g_progdt->myicon = "my-icon";
+          snprintf(path, MAX_PATHLEN, "%s" ICON_PATH "/my-icon",
+                   g_get_user_config_dir());
+          gtk_tree_model_get(model, &iter, 0, &pixbuf, -1);
+          gdk_pixbuf_save(pixbuf, path, "png", NULL, NULL);
+          gtk_icon_theme_add_builtin_icon(g_progdt->myicon.c_str(),
+                                          MAX_ICONSIZE, pixbuf);
+          g_object_unref(pixbuf);
+        } else {
+          g_progdt->myicon = file;
+        }
       }
-    } else
       g_free(file);
+    }
   }
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "archive-chooser-widget"));
@@ -735,7 +847,7 @@ void DataSettings::ObtainPersonalValue() {
 /**
  * 获取与系统相关的数据.
  */
-void DataSettings::ObtainSystemValue() {
+string DataSettings::ObtainSystemValue(bool dryrun) {
   GtkWidget* widget;
   GdkPixbuf* pixbuf;
   GtkTreeModel* model;
@@ -745,13 +857,44 @@ void DataSettings::ObtainSystemValue() {
   gint active;
 
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto progdt = g_cthrd->getProgramData();
+
+  ostringstream oss;
+
+  widget = GTK_WIDGET(g_datalist_get_data(&widset, "port-entry-widget"));
+  text = gtk_editable_get_chars(GTK_EDITABLE(widget), 0, -1);
+  int port;
+  bool port_valid = false;
+  try {
+    port = stoi(text);
+    port_valid = true;
+  } catch (const invalid_argument& e) {
+    oss << _("Port must be a number between 1024 and 65535") << endl;
+  } catch (const out_of_range& e) {
+    oss << _("Port must be a number between 1024 and 65535") << endl;
+  }
+
+  if (port_valid && (port < 1024 || port > 65535)) {
+    oss << _("Port must be a number between 1024 and 65535") << endl;
+    port_valid = false;
+  }
+
+  if (port_valid && port != progdt->port()) {
+    if (!dryrun) {
+      progdt->set_port(port);
+    }
+  }
+
+  // only port need to check
+  if (dryrun) {
+    return oss.str();
+  }
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "codeset-entry-widget"));
   text = gtk_editable_get_chars(GTK_EDITABLE(widget), 0, -1);
   g_strstrip(text);
   if (*text != '\0') {
-    g_progdt->codeset = text;
+    progdt->codeset = text;
   } else
     g_free(text);
 
@@ -759,7 +902,7 @@ void DataSettings::ObtainSystemValue() {
   text = gtk_editable_get_chars(GTK_EDITABLE(widget), 0, -1);
   g_strstrip(text);
   if (*text != '\0') {
-    g_progdt->encode = text;
+    progdt->encode = text;
   } else
     g_free(text);
 
@@ -770,49 +913,59 @@ void DataSettings::ObtainSystemValue() {
     snprintf(path, MAX_PATHLEN, "%d", active);
     gtk_tree_model_get_iter_from_string(model, &iter, path);
     gtk_tree_model_get(model, &iter, 1, &file, -1);
-    if (strcmp(g_progdt->palicon, file) != 0) {
+    if (strcmp(progdt->palicon, file) != 0) {
       snprintf(path, MAX_PATHLEN, __PIXMAPS_PATH "/icon/%s", file);
       if (access(path, F_OK) != 0) {
         g_free(file);
-        g_free(g_progdt->palicon);
-        g_progdt->palicon = g_strdup("pal-icon");
+        g_free(progdt->palicon);
+        progdt->palicon = g_strdup("pal-icon");
         snprintf(path, MAX_PATHLEN, "%s" ICON_PATH "/pal-icon",
                  g_get_user_config_dir());
         gtk_tree_model_get(model, &iter, 0, &pixbuf, -1);
         gdk_pixbuf_save(pixbuf, path, "png", NULL, NULL);
-        gtk_icon_theme_add_builtin_icon(g_progdt->palicon, MAX_ICONSIZE,
-                                        pixbuf);
+        gtk_icon_theme_add_builtin_icon(progdt->palicon, MAX_ICONSIZE, pixbuf);
         g_object_unref(pixbuf);
       } else {
-        g_free(g_progdt->palicon);
-        g_progdt->palicon = file;
+        g_free(progdt->palicon);
+        progdt->palicon = file;
       }
     } else
       g_free(file);
   }
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "font-chooser-widget"));
-  g_free(g_progdt->font);
-  g_progdt->font =
-      g_strdup(gtk_font_chooser_get_font(GTK_FONT_CHOOSER(widget)));
+  g_free(progdt->font);
+  progdt->font = g_strdup(gtk_font_chooser_get_font(GTK_FONT_CHOOSER(widget)));
 
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "chat-check-widget"));
-  g_progdt->SetFlag(7, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setOpenChat(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "statusicon-check-widget"));
-  g_progdt->SetFlag(6, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setHideStartup(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget =
       GTK_WIDGET(g_datalist_get_data(&widset, "transmission-check-widget"));
-  g_progdt->SetFlag(5, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setOpenTransmission(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "enterkey-check-widget"));
-  g_progdt->SetFlag(4, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setUseEnterKey(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "history-check-widget"));
-  g_progdt->SetFlag(3, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setClearupHistory(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "log-check-widget"));
-  g_progdt->SetFlag(2, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setRecordLog(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "blacklist-check-widget"));
-  g_progdt->SetFlag(1, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setOpenBlacklist(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
   widget = GTK_WIDGET(g_datalist_get_data(&widset, "shared-check-widget"));
-  g_progdt->SetFlag(0, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+  progdt->setProofShared(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+#if HAVE_APPINDICATOR
+  widget = GTK_WIDGET(g_datalist_get_data(&widset, "taskbar-check-widget"));
+  progdt->setHideTaskbarWhenMainWindowIconified(
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget)));
+#endif
+  return oss.str();
 }
 
 /**
@@ -840,13 +993,13 @@ void DataSettings::ObtainNetworkValue() {
         ns.endip = endip;
       if (description)
         ns.description = description;
-      netSegments.push_back(move(ns));
+      netSegments.push_back(std::move(ns));
     } while (gtk_tree_model_iter_next(model, &iter));
   }
   auto g_cthrd = app->getCoreThread();
-  auto g_progdt = g_cthrd->getUiProgramData();
+  auto g_progdt = g_cthrd->getProgramData();
   g_progdt->Lock();
-  g_progdt->setNetSegments(move(netSegments));
+  g_progdt->setNetSegments(std::move(netSegments));
   g_progdt->Unlock();
 }
 
@@ -1025,7 +1178,7 @@ void DataSettings::ChoosePhoto(GData** widset) {
              g_get_user_config_dir());
     pixbuf_shrink_scale_1(&pixbuf, MAX_PHOTOSIZE, MAX_PHOTOSIZE);
     gdk_pixbuf_save(pixbuf, path, "bmp", NULL,
-                    NULL);  //命中率极高，不妨直接保存
+                    NULL);  // 命中率极高，不妨直接保存
     image = GTK_WIDGET(g_datalist_get_data(widset, "photo-image-widget"));
     pixbuf_shrink_scale_1(&pixbuf, MAX_PREVIEWSIZE, MAX_PREVIEWSIZE);
     gtk_image_set_from_pixbuf(GTK_IMAGE(image), pixbuf);

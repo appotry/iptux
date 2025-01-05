@@ -9,6 +9,7 @@
 #include "iptux-utils/output.h"
 #include "iptux-utils/utils.h"
 #include "iptux/AboutDialog.h"
+#include "iptux/AppIndicator.h"
 #include "iptux/DataSettings.h"
 #include "iptux/DialogPeer.h"
 #include "iptux/IptuxResource.h"
@@ -18,7 +19,6 @@
 #include "iptux/TransWindow.h"
 #include "iptux/UiCoreThread.h"
 #include "iptux/UiHelper.h"
-#include "iptux/UiProgramData.h"
 #include "iptux/dialog.h"
 
 #if SYSTEM_DARWIN
@@ -46,7 +46,7 @@ void onReportBug() {
 }
 
 void onWhatsNew() {
-  iptux_open_url("https://github.com/iptux-src/iptux/blob/master/NEWS.md");
+  iptux_open_url("https://github.com/iptux-src/iptux/blob/master/NEWS");
 }
 
 void iptux_init(LogSystem* logSystem) {
@@ -71,7 +71,6 @@ Application::Application(shared_ptr<IptuxConfig> config)
 
   transModel = transModelNew();
   menuBuilder = nullptr;
-  eventAdaptor = nullptr;
   logSystem = nullptr;
 
   app = gtk_application_new(application_id.c_str(), G_APPLICATION_FLAGS_NONE);
@@ -82,6 +81,7 @@ Application::Application(shared_ptr<IptuxConfig> config)
   notificationService = new TerminalNotifierNoticationService();
 #else
   notificationService = new GioNotificationService();
+  use_header_bar_ = true;
   // GError* error = nullptr;
   // if(!g_application_register(G_APPLICATION(app), nullptr, &error)) {
   //   LOG_WARN("g_application_register failed: %s-%d-%s",
@@ -97,9 +97,6 @@ Application::~Application() {
     g_object_unref(menuBuilder);
   }
   transModelDelete(transModel);
-  if (eventAdaptor) {
-    delete eventAdaptor;
-  }
   if (logSystem) {
     delete logSystem;
   }
@@ -124,13 +121,37 @@ void Application::onStartup(Application& self) {
   iptux_register_resource();
   self.menuBuilder =
       gtk_builder_new_from_resource(IPTUX_RESOURCE "gtk/menus.ui");
-  self.data = make_shared<UiProgramData>(self.config);
+  self.data = make_shared<ProgramData>(self.config);
   self.logSystem = new LogSystem(self.data);
   self.cthrd = make_shared<UiCoreThread>(&self, self.data);
+  if (self.enable_app_indicator_) {
+    self.app_indicator = make_shared<IptuxAppIndicator>(&self);
+  }
+
+  bool use_app_menu = true;
+#if SYSTEM_DARWIN
+#else
+  use_app_menu = gtk_application_prefers_app_menu(self.app);
+#endif
+
+  if (use_app_menu) {
+    auto app_menu =
+        G_MENU_MODEL(gtk_builder_get_object(self.menuBuilder, "appmenu"));
+    gtk_application_set_app_menu(GTK_APPLICATION(self.app), app_menu);
+    self.menu_ = G_MENU_MODEL(
+        gtk_builder_get_object(self.menuBuilder, "menubar-when-app-menu"));
+    if (!self.use_header_bar()) {
+      gtk_application_set_menubar(GTK_APPLICATION(self.app), self.menu());
+    }
+  } else {
+    self.menu_ = G_MENU_MODEL(
+        gtk_builder_get_object(self.menuBuilder, "menubar-when-no-app-menu"));
+    if (!self.use_header_bar()) {
+      gtk_application_set_menubar(GTK_APPLICATION(self.app), self.menu());
+    }
+  }
+
   self.window = new MainWindow(&self, *self.cthrd);
-  self.eventAdaptor = new EventAdaptor(
-      self.cthrd->signalEvent,
-      [&](shared_ptr<const Event> event) { self.onEvent(event); });
 
   GActionEntry app_entries[] = {
       makeActionEntry("quit", G_ACTION_CALLBACK(onQuit)),
@@ -150,16 +171,11 @@ void Application::onStartup(Application& self) {
       makeActionEntry("about", G_ACTION_CALLBACK(onAbout)),
       makeParamActionEntry("open-chat", G_ACTION_CALLBACK(onOpenChat), "s"),
       makeActionEntry("window.close", G_ACTION_CALLBACK(onWindowClose)),
+      makeActionEntry("open_main_window", G_ACTION_CALLBACK(onOpenMainWindow)),
   };
 
   g_action_map_add_action_entries(G_ACTION_MAP(self.app), app_entries,
                                   G_N_ELEMENTS(app_entries), &self);
-  auto app_menu =
-      G_MENU_MODEL(gtk_builder_get_object(self.menuBuilder, "appmenu"));
-  gtk_application_set_app_menu(GTK_APPLICATION(self.app), app_menu);
-  auto menubar =
-      G_MENU_MODEL(gtk_builder_get_object(self.menuBuilder, "menubar"));
-  gtk_application_set_menubar(GTK_APPLICATION(self.app), menubar);
 
   add_accelerator(self.app, "app.quit", "<Primary>Q");
   add_accelerator(self.app, "win.refresh", "F5");
@@ -189,6 +205,7 @@ void Application::onActivate(Application& self) {
     exit(1);
   }
   iptux_init(self.logSystem);
+  g_idle_add(G_SOURCE_FUNC(Application::ProcessEvents), &self);
 }
 
 void Application::onQuit(void*, void*, Application& self) {
@@ -202,6 +219,10 @@ void Application::onQuit(void*, void*, Application& self) {
 
 void Application::onPreferences(void*, void*, Application& self) {
   DataSettings::ResetDataEntry(&self, GTK_WIDGET(self.window->getWindow()));
+}
+
+void Application::onOpenMainWindow(void*, void*, Application& self) {
+  self.getMainWindow()->Show();
 }
 
 void Application::onToolsTransmission(void*, void*, Application& self) {
@@ -298,7 +319,7 @@ void Application::onEvent(shared_ptr<const Event> _event) {
       return;
     }
     this->updateItemToTransTree(*para);
-    auto g_progdt = cthrd->getUiProgramData();
+    auto g_progdt = cthrd->getProgramData();
     if (g_progdt->IsAutoOpenFileTrans()) {
       this->openTransWindow();
     }
@@ -372,6 +393,25 @@ void Application::onOpenChat(GSimpleAction*,
     return;
   }
   DialogPeer::PeerDialogEntry(&self, groupInfo);
+}
+
+gboolean Application::ProcessEvents(gpointer data) {
+  auto self = static_cast<Application*>(data);
+  if (self->getCoreThread()->HasEvent()) {
+    auto start = chrono::high_resolution_clock::now();
+    auto e = self->getCoreThread()->PopEvent();
+    self->onEvent(e);
+    self->getMainWindow()->ProcessEvent(e);
+    auto elapsed = std::chrono::high_resolution_clock::now() - start;
+    LOG_INFO(
+        "type: %s, from: %s, time: %jdus", EventTypeToStr(e->getType()),
+        e->getSource().c_str(),
+        (intmax_t)chrono::duration_cast<chrono::microseconds>(elapsed).count());
+    g_idle_add(Application::ProcessEvents, data);
+  } else {
+    g_timeout_add(100, Application::ProcessEvents, data);  // 100ms
+  }
+  return G_SOURCE_REMOVE;
 }
 
 }  // namespace iptux

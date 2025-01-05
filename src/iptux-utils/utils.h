@@ -25,11 +25,6 @@ namespace iptux {
    1000000.0f)
 #define percent(num1, num2) (100.0f * (num1) / (num2))
 
-#define FLAG_ISSET(num, bit) ((num) & (1 << (bit)))
-void FLAG_SET(uint8_t& num, int bit);
-void FLAG_SET(uint8_t& num, int bit, bool value);
-#define FLAG_CLR(num, bit) ((num) &= (~(1 << (bit))))
-
 #define URL_REGEX                                          \
   "(http|ftp|https|sftp):\\/\\/[\\w\\-_]+(\\.[\\w\\-_]+)+" \
   "([\\w\\-\\.,@?^=%&amp;:/~\\+#]*[\\w\\-\\@?^=%&amp;/~\\+#])?"
@@ -47,9 +42,11 @@ char* convert_encode(const char* string,
                      const char* fromcode);
 std::string assert_filename_inexist(const char* path);
 std::string dupPath(const std::string& fname, int idx);
-char* getformattime(gboolean date, const char* format, ...);
+char* getformattime(gboolean date, const char* format, ...) G_GNUC_PRINTF(2, 3);
+char* getformattime2(time_t now, gboolean date, const char* format, ...)
+    G_GNUC_PRINTF(3, 4);
 
-gboolean giter_compare_foreach(gunichar src, gunichar dst);
+gboolean ig_unichar_is_atomic(gunichar ch);
 
 char* numeric_to_size(int64_t numeric);
 char* numeric_to_rate(uint32_t numeric);
@@ -114,6 +111,7 @@ class Helper {
 };
 
 ssize_t xwrite(int fd, const void* buf, size_t count);
+ssize_t xsend(int fd, const void* buf, size_t count);
 ssize_t xread(int fd, void* buf, size_t count);
 ssize_t read_ipmsg_prefix(int fd, void* buf, size_t count);
 ssize_t read_ipmsg_filedata(int fd, void* buf, size_t count, size_t offset);

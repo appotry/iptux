@@ -1,8 +1,10 @@
 #include "config.h"
 #include "UiHelper.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 #include <glib/gi18n.h>
 #include <sys/socket.h>
 
@@ -14,33 +16,58 @@ using namespace std;
 
 namespace iptux {
 
+static atomic_bool open_url_enabled(true);
+static bool pop_disabled = false;
+
+void iptux_open_path(const char* path) {
+  g_return_if_fail(!!path);
+
+  GError* error = nullptr;
+  gchar* uri = g_filename_to_uri(path, nullptr, &error);
+  if (error) {
+    LOG_WARN(_("Can't convert path to uri: %s, reason: %s"), path,
+             error->message);
+    g_error_free(error);
+    return;
+  }
+  if (!open_url_enabled) {
+    LOG_INFO("iptux_open_path %s", path);
+  } else {
+    g_app_info_launch_default_for_uri(uri, nullptr, &error);
+  }
+  if (error) {
+    LOG_WARN(_("Can't open path: %s, reason: %s"), path, error->message);
+    g_error_free(error);
+  }
+  g_free(uri);
+}
+
+void _ForTestToggleOpenUrl(bool enable) {
+  open_url_enabled = enable;
+}
+
 /**
  * 打开URL.
  * @param url url
  */
 void iptux_open_url(const char* url) {
-  int fd;
+  g_return_if_fail(!!url);
 
-  if (fork() != 0)
+  if (url[0] == '/') {
+    iptux_open_path(url);
     return;
-
-  /* 关闭由iptux打开的所有可能的文件描述符 */
-  fd = 3;
-  while (fd < FD_SETSIZE) {
-    close(fd);
-    fd++;
   }
-  /* 脱离终端控制 */
-  setsid();
 
-  /* 打开URL */
-  execlp("xdg-open", "xdg-open", url, NULL);
-  /* 测试系统中所有可能被安装的浏览器 */
-  execlp("firefox", "firefox", url, NULL);
-  execlp("opera", "opera", url, NULL);
-  execlp("konqueror", "konqueror", url, NULL);
-  execlp("open", "open", url, NULL);
-  LOG_WARN(_("Can't find any available web browser!\n"));
+  GError* error = nullptr;
+  if (!open_url_enabled) {
+    LOG_INFO("iptux_open_url %s", url);
+  } else {
+    g_app_info_launch_default_for_uri(url, nullptr, &error);
+  }
+  if (error) {
+    LOG_WARN(_("Can't open URL: %s, reason: %s"), url, error->message);
+    g_error_free(error);
+  }
 }
 
 bool ValidateDragData(GtkSelectionData* data,
@@ -129,6 +156,10 @@ GSList* selection_data_get_path(GtkSelectionData* data) {
   return filelist;
 }
 
+void pop_disable() {
+  pop_disabled = true;
+}
+
 /**
  * 弹出消息提示.
  * @param parent parent window
@@ -143,6 +174,13 @@ void pop_info(GtkWidget* parent, const gchar* format, ...) {
   va_start(ap, format);
   msg = g_strdup_vprintf(format, ap);
   va_end(ap);
+
+  if (pop_disabled) {
+    LOG_INFO("%s\n", msg);
+    g_free(msg);
+    return;
+  }
+
   dialog = gtk_message_dialog_new(GTK_WINDOW(parent), GTK_DIALOG_MODAL,
                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK, NULL);
   gtk_message_dialog_set_markup(GTK_MESSAGE_DIALOG(dialog), msg);
@@ -166,6 +204,13 @@ void pop_warning(GtkWidget* parent, const gchar* format, ...) {
   va_start(ap, format);
   msg = g_strdup_vprintf(format, ap);
   va_end(ap);
+
+  if (pop_disabled) {
+    LOG_WARN("%s\n", msg);
+    g_free(msg);
+    return;
+  }
+
   dialog = gtk_message_dialog_new(GTK_WINDOW(parent), GTK_DIALOG_MODAL,
                                   GTK_MESSAGE_INFO, GTK_BUTTONS_OK, NULL);
   gtk_message_dialog_set_markup(GTK_MESSAGE_DIALOG(dialog), msg);
@@ -285,6 +330,73 @@ GActionEntry makeStateActionEntry(const string& name,
 gboolean gtk_window_iconify_on_delete(GtkWindow* window) {
   gtk_window_iconify(window);
   return TRUE;
+}
+
+GtkHeaderBar* CreateHeaderBar(GtkWindow* window, GMenuModel* menu) {
+  GtkBuilder* builder =
+      gtk_builder_new_from_resource(IPTUX_RESOURCE "gtk/HeaderBar.ui");
+  GtkHeaderBar* headerBar =
+      GTK_HEADER_BAR(gtk_builder_get_object(builder, "header_bar"));
+  gtk_header_bar_set_has_subtitle(headerBar, FALSE);
+  auto menuButton = gtk_builder_get_object(builder, "menu_button");
+  gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menuButton), menu);
+  gtk_window_set_titlebar(window, GTK_WIDGET(headerBar));
+
+  g_object_unref(builder);
+  return headerBar;
+}
+
+std::string TimeToStr(time_t t) {
+  time_t now = time(nullptr);
+  return TimeToStr_(t, now);
+}
+
+std::string TimeToStr_(time_t t, time_t now) {
+  struct tm tm_t;
+  struct tm tm_now;
+  localtime_r(&t, &tm_t);
+  localtime_r(&now, &tm_now);
+  char res[11];
+  if (tm_t.tm_year == tm_now.tm_year && tm_t.tm_yday == tm_now.tm_yday) {
+    strftime(res, sizeof(res), "%H:%M", &tm_t);
+  } else {
+    strftime(res, sizeof(res), "%F", &tm_t);
+  }
+  return res;
+}
+
+string StrFirstNonEmptyLine(const string& s) {
+  size_t pos = s.find_first_not_of(" \r\n");
+  if (pos == string::npos) {
+    return "";
+  }
+  size_t pos2 = s.find_first_of("\r\n", pos);
+  if (pos2 == string::npos) {
+    return s.substr(pos);
+  }
+  return s.substr(pos, pos2 - pos);
+}
+
+GtkImage* igtk_image_new_with_size(const char* filename,
+                                   int width,
+                                   int height) {
+  GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(filename, NULL);
+  if (!pixbuf) {
+    LOG_ERROR("Error loading image.");
+    return NULL;
+  }
+
+  pixbuf_shrink_scale_1(&pixbuf, width, height);
+  return GTK_IMAGE(gtk_image_new_from_pixbuf(pixbuf));
+}
+
+string igtk_text_buffer_get_text(GtkTextBuffer* buffer) {
+  GtkTextIter start, end;
+  gtk_text_buffer_get_bounds(buffer, &start, &end);
+  char* res1 = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
+  string res(res1);
+  g_free(res1);
+  return res;
 }
 
 }  // namespace iptux

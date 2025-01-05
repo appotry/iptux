@@ -17,6 +17,7 @@
 #include "iptux-core/Models.h"
 #include "iptux/Application.h"
 #include "iptux/DialogBase.h"
+#include <memory>
 
 namespace iptux {
 
@@ -46,6 +47,7 @@ class DialogPeer : public DialogBase {
   void init();
 
   GtkWindow* CreateMainWindow();
+  void CreateTitle();
   GtkWidget* CreateAllArea();
 
   GtkWidget* CreateInfoArea();
@@ -62,11 +64,12 @@ class DialogPeer : public DialogBase {
   void BroadcastEnclosureMsg(const std::vector<FileInfo*>& files) override;
 
   bool SendTextMsg() override;
-  void FeedbackMsg(const std::vector<ChipData>& dtlist);
+  void FeedbackMsg(std::shared_ptr<MsgPara> msgPara);
   MsgPara* PackageMsg(const std::vector<ChipData>& dtlist);
   void refreshSendAction();
+  std::string GetTitle();
 
-  //回调处理部分
+  // 回调处理部分
  private:
   static void onRecvTreeSelectionChanged(DialogPeer& self, GtkTreeSelection*);
   static void onAcceptButtonClicked(DialogPeer* self);
@@ -89,6 +92,7 @@ class DialogPeer : public DialogBase {
     DialogBase::AttachFolder(&self);
   }
   static void onRequestSharedResources(void*, void*, DialogPeer& self);
+  static void onPaste(void*, void*, DialogPeer* self);
   static void onSendMessage(void*, void*, DialogPeer& self) {
     DialogBase::SendMessage(&self);
   }
@@ -103,9 +107,9 @@ class DialogPeer : public DialogBase {
  protected:
   GtkApplicationWindow* window;
   std::shared_ptr<IptuxConfig> config;
-  int64_t torcvsize;  //总计待接收大小(包括已接收)
-  int64_t rcvdsize;   //总计已接收大小
-  guint timerrcv;     //接收文件界面更新计时器ID
+  int64_t torcvsize;  // 总计待接收大小(包括已接收)
+  int64_t rcvdsize;   // 总计已接收大小
+  guint timerrcv;     // 接收文件界面更新计时器ID
   GtkWidget* fileToReceiveTreeviewWidget = nullptr;
   gulong sigId = 0;
 };

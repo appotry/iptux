@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <glib/gi18n.h>
 #include <sys/param.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -56,8 +57,8 @@ char* iptux_string_validate(const char* s,
   char *tstring, *cset;
   gsize rbytes, wbytes;
 
-  *encode = NULL;  //设置字符集编码未知
-  tstring = NULL;  //设置utf8有效串尚未成功获取
+  *encode = NULL;  // 设置字符集编码未知
+  tstring = NULL;  // 设置utf8有效串尚未成功获取
   if (!g_utf8_validate(s, -1, NULL) && !codeset.empty()) {
     cset = NULL;
     ptr = codeset.c_str();
@@ -185,14 +186,29 @@ char* getformattime(gboolean date, const char* format, ...) {
   return ptr;
 }
 
-/**
- * 对GtkTextBuffer的迭代器(GtkTextIter)所指的字符进行比较.
- * @param src 源字符
- * @param dst 目标字符
- * @return Gtk+库
- */
-gboolean giter_compare_foreach(gunichar src, gunichar dst) {
-  return (src == dst);
+char* getformattime2(time_t tt, gboolean date, const char* format, ...) {
+  char buf[MAX_BUFLEN], *msg, *ptr;
+  va_list ap;
+
+  va_start(ap, format);
+  msg = g_strdup_vprintf(format, ap);
+  va_end(ap);
+
+  struct tm tm;
+  localtime_r(&tt, &tm);
+  if (date)
+    strftime(buf, MAX_BUFLEN, "%c", &tm);
+  else
+    strftime(buf, MAX_BUFLEN, "%X", &tm);
+
+  ptr = g_strdup_printf("(%s) %s:", buf, msg);
+  g_free(msg);
+
+  return ptr;
+}
+
+gboolean ig_unichar_is_atomic(gunichar ch) {
+  return ch == 0xFFFC;
 }
 
 /**
@@ -296,7 +312,7 @@ const char* iptux_skip_section(const char* string, char ch, uint8_t times) {
   while (count < times) {
     if (!(ptr = strchr(ptr, ch)))
       break;
-    ptr++;  //跳过当前分割字符
+    ptr++;  // 跳过当前分割字符
     count++;
   }
 
@@ -389,17 +405,17 @@ char* iptux_get_section_string(const char* msg, char ch, uint8_t times) {
  * @note (msg)串会被修改
  */
 char* ipmsg_get_filename(const char* msg, char ch, uint8_t times) {
-  char filename[256];  //文件最大长度为255
+  char filename[256];  // 文件最大长度为255
   const char* ptr;
 
   if ((ptr = iptux_skip_section(msg, ch, times))) {
     size_t len = 0;
     while (*ptr != ':' || strncmp(ptr, "::", 2) == 0) {
-      if (len < 255) {  //防止缓冲区溢出
+      if (len < 255) {  // 防止缓冲区溢出
         filename[len] = *ptr;
         len++;
       }
-      if (*ptr == ':') {  //抹除分割符
+      if (*ptr == ':') {  // 抹除分割符
         memcpy((void*)ptr, "xx", 2);
         ptr++;
       }
@@ -437,7 +453,7 @@ char* ipmsg_get_attach(const char* msg, char ch, uint8_t times) {
  * @note 文件名特殊格式请参考IPMsg协议
  */
 char* ipmsg_get_filename_pal(const char* pathname) {
-  char filename[512];  //文件最大长度为255
+  char filename[512];  // 文件最大长度为255
   const char* ptr;
   size_t len;
 
@@ -516,18 +532,6 @@ char* ipmsg_get_pathname_full(const char* path, const char* name) {
   return g_strdup(filename);
 }
 
-void FLAG_SET(uint8_t& num, int bit) {
-  ((num) |= (1 << (bit)));
-}
-
-void FLAG_SET(uint8_t& num, int bit, bool value) {
-  if (value) {
-    ((num) |= (1 << (bit)));
-  } else {
-    ((num) &= (~(1 << (bit))));
-  }
-}
-
 std::string inAddrToString(in_addr inAddr) {
   char res[INET_ADDRSTRLEN];
   inet_ntop(AF_INET, &inAddr.s_addr, res, INET_ADDRSTRLEN);
@@ -579,8 +583,7 @@ std::string stringDump(const std::string& str) {
     }
     oss << "|\n";
   }
-  oss << stringFormat("%08lx\n", str.size());
-  ;
+  oss << stringFormat("%08jx\n", (uintmax_t)str.size());
   return oss.str();
 }
 
@@ -631,10 +634,33 @@ ssize_t xwrite(int fd, const void* buf, size_t count) {
 
   size = -1;
   offset = 0;
-  while ((offset != count) && (size != 0)) {
+  while (offset < count) {
     if ((size = write(fd, (char*)buf + offset, count - offset)) == -1) {
-      if (errno == EINTR)
+      if (errno == EINTR || errno == EAGAIN)
         continue;
+      LOG_ERROR("write to %d failed on %zu/%zu: %s", fd, offset, count,
+                strerror(errno));
+      return -1;
+    }
+    offset += size;
+  }
+
+  return offset;
+}
+
+ssize_t xsend(int fd, const void* buf, size_t count) {
+  size_t offset;
+  ssize_t size;
+
+  size = -1;
+  offset = 0;
+  while (offset < count) {
+    if ((size = send(fd, (char*)buf + offset, count - offset, MSG_NOSIGNAL)) ==
+        -1) {
+      if (errno == EINTR || errno == EAGAIN)
+        continue;
+      LOG_ERROR("send to %d failed on %zu/%zu: %s", fd, offset, count,
+                strerror(errno));
       return -1;
     }
     offset += size;
@@ -792,7 +818,7 @@ ssize_t read_ipmsg_fileinfo(int fd, void* buf, size_t count, size_t offset) {
   ssize_t size;
   uint32_t headsize;
 
-  if (offset < count)  //注意不要写到缓冲区外了
+  if (offset < count)  // 注意不要写到缓冲区外了
     ((char*)buf)[offset] = '\0';
   while (!offset || !strchr((char*)buf, ':') ||
          sscanf((char*)buf, "%" SCNx32, &headsize) != 1 || headsize > offset) {

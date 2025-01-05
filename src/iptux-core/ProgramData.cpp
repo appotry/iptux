@@ -5,6 +5,7 @@
 #include <sys/time.h>
 
 #include "iptux-core/internal/ipmsg.h"
+#include "iptux-utils/output.h"
 #include "iptux-utils/utils.h"
 
 using namespace std;
@@ -17,7 +18,7 @@ static const char* CONFIG_SHARED_FILE_LIST = "shared_file_list";
  * 类构造函数.
  */
 ProgramData::ProgramData(shared_ptr<IptuxConfig> config)
-    : palicon(NULL), font(NULL), config(config), flags(0) {
+    : palicon(NULL), font(NULL), config(config), need_restart_(0) {
   gettimeofday(&timestamp, NULL);
   InitSublayer();
 }
@@ -45,27 +46,29 @@ void ProgramData::InitSublayer() {
  * 写出程序数据.
  */
 void ProgramData::WriteProgData() {
-  gettimeofday(&timestamp, NULL);  //更新时间戳
+  gettimeofday(&timestamp, NULL);  // 更新时间戳
   config->SetString("nick_name", nickname);
   config->SetString("belong_group", mygroup);
   config->SetString("my_icon", myicon);
   config->SetString("archive_path", path);
   config->SetString("personal_sign", sign);
 
+  config->SetInt("port", port_);
   config->SetString("candidacy_encode", codeset);
   config->SetString("preference_encode", encode);
   config->SetString("pal_icon", palicon);
   config->SetString("panel_font", font);
 
-  config->SetBool("open_chat", FLAG_ISSET(flags, 7));
-  config->SetBool("hide_startup", FLAG_ISSET(flags, 6));
-  config->SetBool("open_transmission", FLAG_ISSET(flags, 5));
-  config->SetBool("use_enter_key", FLAG_ISSET(flags, 4));
-  config->SetBool("clearup_history", FLAG_ISSET(flags, 3));
-  config->SetBool("record_log", FLAG_ISSET(flags, 2));
-  config->SetBool("open_blacklist", FLAG_ISSET(flags, 1));
-  config->SetBool("proof_shared", FLAG_ISSET(flags, 0));
-
+  config->SetBool("open_chat", open_chat);
+  config->SetBool("hide_startup", hide_startup);
+  config->SetBool("open_transmission", open_transmission);
+  config->SetBool("use_enter_key", use_enter_key);
+  config->SetBool("clearup_history", clearup_history);
+  config->SetBool("record_log", record_log);
+  config->SetBool("open_blacklist", open_blacklist);
+  config->SetBool("proof_shared", proof_shared);
+  config->SetBool("hide_taskbar_when_main_window_iconified",
+                  hide_taskbar_when_main_window_iconified_);
   config->SetString("access_shared_limit", passwd);
   config->SetInt("send_message_retry_in_us", send_message_retry_in_us);
   WriteNetSegment();
@@ -84,6 +87,21 @@ const std::vector<NetSegment>& ProgramData::getNetSegments() const {
 
 void ProgramData::setNetSegments(std::vector<NetSegment>&& netSegments) {
   netseg = netSegments;
+}
+
+void ProgramData::set_port(uint16_t port, bool is_init) {
+  if (port == port_)
+    return;
+
+  uint16_t old_port = port_;
+  port_ = port;
+  if (port_ < 1024 || port_ > 65535) {
+    LOG_WARN("Invalid port number: %d, use default port: %d", port_,
+             IPTUX_DEFAULT_PORT);
+    port_ = IPTUX_DEFAULT_PORT;
+  }
+  if (!is_init && old_port != port_)
+    need_restart_ = true;
 }
 
 /**
@@ -110,19 +128,22 @@ void ProgramData::ReadProgData() {
   path = config->GetString("archive_path", g_get_home_dir());
   sign = config->GetString("personal_sign");
 
+  set_port(config->GetInt("port", IPTUX_DEFAULT_PORT), true);
   codeset = config->GetString("candidacy_encode", "gb18030,utf-16");
   encode = config->GetString("preference_encode", "utf-8");
   palicon = g_strdup(config->GetString("pal_icon", "icon-qq.png").c_str());
   font = g_strdup(config->GetString("panel_font", "Sans Serif 10").c_str());
 
-  FLAG_SET(flags, 7, config->GetBool("open_chat"));
-  FLAG_SET(flags, 6, config->GetBool("hide_startup"));
-  FLAG_SET(flags, 5, config->GetBool("open_transmission"));
-  FLAG_SET(flags, 4, config->GetBool("use_enter_key"));
-  FLAG_SET(flags, 3, config->GetBool("clearup_history"));
-  FLAG_SET(flags, 2, config->GetBool("record_log", true));
-  FLAG_SET(flags, 1, config->GetBool("open_blacklist"));
-  FLAG_SET(flags, 0, config->GetBool("proof_shared"));
+  open_chat = config->GetBool("open_chat");
+  hide_startup = config->GetBool("hide_startup");
+  open_transmission = config->GetBool("open_transmission");
+  use_enter_key = config->GetBool("use_enter_key");
+  clearup_history = config->GetBool("clearup_history");
+  record_log = config->GetBool("record_log", true);
+  open_blacklist = config->GetBool("open_blacklist");
+  proof_shared = config->GetBool("proof_shared");
+  hide_taskbar_when_main_window_iconified_ =
+      config->GetBool("hide_taskbar_when_main_window_iconified");
 
   passwd = config->GetString("access_shared_limit");
   send_message_retry_in_us =
@@ -189,43 +210,43 @@ void ProgramData::Unlock() {
   mutex.unlock();
 }
 
-bool ProgramData::IsAutoOpenCharDialog() const {
-  return FLAG_ISSET(flags, 7);
+bool ProgramData::IsAutoOpenChatDialog() const {
+  return open_chat;
 }
 
 bool ProgramData::IsAutoHidePanelAfterLogin() const {
-  return FLAG_ISSET(flags, 6);
+  return hide_startup;
 }
 
 bool ProgramData::IsAutoOpenFileTrans() const {
-  return FLAG_ISSET(flags, 5);
+  return open_transmission;
 }
 bool ProgramData::IsEnterSendMessage() const {
-  return FLAG_ISSET(flags, 4);
+  return use_enter_key;
 }
 bool ProgramData::IsAutoCleanChatHistory() const {
-  return FLAG_ISSET(flags, 3);
+  return clearup_history;
 }
 bool ProgramData::IsSaveChatHistory() const {
-  return FLAG_ISSET(flags, 2);
+  return record_log;
 }
 bool ProgramData::IsUsingBlacklist() const {
-  return FLAG_ISSET(flags, 1);
+  return open_blacklist;
 }
 bool ProgramData::IsFilterFileShareRequest() const {
-  return FLAG_ISSET(flags, 0);
+  return proof_shared;
 }
 
-void ProgramData::SetFlag(int idx, bool flag) {
-  if (flag) {
-    FLAG_SET(flags, idx);
-  } else {
-    FLAG_CLR(flags, idx);
-  }
+bool ProgramData::isHideTaskbarWhenMainWindowIconified() const {
+#if HAVE_APPINDICATOR
+  return hide_taskbar_when_main_window_iconified_;
+#else
+  return false;
+#endif
 }
 
 ProgramData& ProgramData::SetUsingBlacklist(bool value) {
-  SetFlag(1, value);
+  open_blacklist = value;
   return *this;
 }
 
@@ -252,7 +273,7 @@ void ProgramData::ClearShareFileInfos() {
 }
 
 void ProgramData::AddShareFileInfo(FileInfo fileInfo) {
-  sharedFileInfos.emplace_back(move(fileInfo));
+  sharedFileInfos.emplace_back(std::move(fileInfo));
 }
 
 }  // namespace iptux

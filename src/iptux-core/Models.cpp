@@ -14,6 +14,7 @@
 
 #include <glib/gi18n.h>
 #include <glib/gstdio.h>
+#include <netinet/in.h>
 #include <sstream>
 #include <unistd.h>
 
@@ -25,59 +26,56 @@ using namespace std;
 
 namespace iptux {
 
-PalInfo::PalInfo()
-    : ipv4({0}),
-      segdes(NULL),
-      photo(NULL),
-      sign(NULL),
-      iconfile(NULL),
-      packetn(0),
-      rpacketn(0),
-      flags(0) {}
+PalInfo::PalInfo(in_addr ipv4, uint16_t port)
+    : segdes(NULL), photo(NULL), sign(NULL), packetn(0), rpacketn(0) {
+  this->ipv4_ = ipv4;
+  this->port_ = port;
+  compatible = 0;
+  online = 0;
+  changed = 0;
+  in_blacklist = 0;
+}
+
+PalInfo::PalInfo(const string& ipv4, uint16_t port)
+    : segdes(NULL), photo(NULL), sign(NULL), packetn(0), rpacketn(0) {
+  this->ipv4_ = inAddrFromString(ipv4);
+  this->port_ = port;
+  compatible = 0;
+  online = 0;
+  changed = 0;
+  in_blacklist = 0;
+}
 
 PalInfo::~PalInfo() {
   g_free(segdes);
   g_free(photo);
   g_free(sign);
-  g_free(iconfile);
 }
 
 bool PalInfo::isCompatible() const {
-  return FLAG_ISSET(this->flags, 0);
+  return compatible;
 }
 
 bool PalInfo::isOnline() const {
-  return FLAG_ISSET(this->flags, 1);
+  return online;
 }
 
 bool PalInfo::isChanged() const {
-  return FLAG_ISSET(this->flags, 2);
+  return changed;
 }
 
 PalInfo& PalInfo::setCompatible(bool value) {
-  if (value) {
-    FLAG_SET(this->flags, 0);
-  } else {
-    FLAG_CLR(this->flags, 0);
-  }
+  this->compatible = value;
   return *this;
 }
 
 PalInfo& PalInfo::setOnline(bool value) {
-  if (value) {
-    FLAG_SET(this->flags, 1);
-  } else {
-    FLAG_CLR(this->flags, 1);
-  }
+  this->online = value;
   return *this;
 }
 
 PalInfo& PalInfo::setChanged(bool value) {
-  if (value) {
-    FLAG_SET(this->flags, 2);
-  } else {
-    FLAG_CLR(this->flags, 2);
-  }
+  this->changed = value;
   return *this;
 }
 
@@ -114,11 +112,12 @@ PalInfo& PalInfo::setGroup(const std::string& group) {
 string PalInfo::toString() const {
   return stringFormat(
       "PalInfo(IP=%s,name=%s,segdes=%s,version=%s,user=%s,host=%s,group=%s,"
-      "photo=%s,sign=%s,iconfile=%s,encode=%s,packetn=%d,rpacketn=%d,flags=%d)",
-      inAddrToString(ipv4).c_str(), name.c_str(), segdes, version.c_str(),
+      "photo=%s,sign=%s,iconfile=%s,encode=%s,packetn=%d,rpacketn=%d,"
+      "compatible=%d,online=%d,changed=%d,in_blacklist=%d)",
+      inAddrToString(ipv4()).c_str(), name.c_str(), segdes, version.c_str(),
       user.c_str(), host.c_str(), group.c_str(), photo ? photo : "(NULL)",
-      sign ? sign : "(NULL)", iconfile, encode.c_str(), int(packetn),
-      int(rpacketn), int(flags));
+      sign ? sign : "(NULL)", icon_file_.c_str(), encode.c_str(), int(packetn),
+      int(rpacketn), compatible, online, changed, in_blacklist);
 }
 
 FileInfo::FileInfo()
@@ -254,8 +253,6 @@ string ChipData::getSummary() const {
   }
   return "";
 }
-
-PalKey::PalKey(in_addr ipv4) : ipv4(ipv4), port(IPTUX_DEFAULT_PORT) {}
 
 PalKey::PalKey(in_addr ipv4, int port) : ipv4(ipv4), port(port) {}
 

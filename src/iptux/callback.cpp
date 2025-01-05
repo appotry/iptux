@@ -19,7 +19,6 @@
 
 #include "iptux-core/Const.h"
 #include "iptux/UiHelper.h"
-#include "iptux/UiProgramData.h"
 
 using namespace std;
 
@@ -302,22 +301,6 @@ gboolean textview_motion_notify_event(GtkWidget* textview,
                                         GTK_TEXT_WINDOW_WIDGET, event->x,
                                         event->y, &x, &y);
   textview_set_cursor_if_appropriate(GTK_TEXT_VIEW(textview), x, y);
-
-  return FALSE;
-}
-
-gboolean textview_visibility_notify_event(GtkWidget* textview,
-                                          GdkEventVisibility*) {
-  gint wx, wy, bx, by;
-
-  auto window = gtk_widget_get_window(textview);
-  auto display = gdk_window_get_display(window);
-  auto seat = gdk_display_get_default_seat(display);
-  auto device = gdk_seat_get_pointer(seat);
-  gdk_window_get_device_position(window, device, &wx, &wy, NULL);
-  gtk_text_view_window_to_buffer_coords(
-      GTK_TEXT_VIEW(textview), GTK_TEXT_WINDOW_WIDGET, wx, wy, &bx, &by);
-  textview_set_cursor_if_appropriate(GTK_TEXT_VIEW(textview), bx, by);
 
   return FALSE;
 }
